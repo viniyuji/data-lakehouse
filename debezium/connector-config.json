@@ -1,0 +1,21 @@
+{
+  "connector.class": "io.debezium.connector.postgresql.PostgresConnector",
+  "tasks.max": "1",
+  "plugin.name": "pgoutput",
+  "database.hostname": "postgres",
+  "database.port": "5432",
+  "database.user": "postgres",
+  "database.password": "postgres",
+  "database.dbname": "lakehouse",
+  "topic.prefix": "lakehouse",
+  "schema.include.list": "public",
+  "table.include.list": "public.clients,public.products,public.sales",
+  "slot.name": "debezium_lakehouse_slot",
+  "publication.name": "dbz_lakehouse_publication",
+  "publication.autocreate.mode": "filtered",
+  "decimal.handling.mode": "double",
+  "key.converter": "org.apache.kafka.connect.json.JsonConverter",
+  "key.converter.schemas.enable": "false",
+  "value.converter": "org.apache.kafka.connect.json.JsonConverter",
+  "value.converter.schemas.enable": "false"
+}
