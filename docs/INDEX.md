@@ -37,3 +37,7 @@ Read only the documents relevant to your current task before modifying code:
    - Running `docker compose up -d` repeatedly against an already-running stack must succeed with exit code `0` without duplicating Flink jobs or failing on existing buckets/topics/connectors.
 7. **Fake Data Generator MUST remain a single Python file (`generate_data.py`)**:
    - Keep inline PEP 723 script metadata (`# /// script`) synchronized with `requirements.txt` so both `uv run generate_data.py` and `pip` virtual environments work out of the box.
+8. **Dimension CDC Topics MUST use `cleanup.policy=compact` (Never Time-Based `delete`)**:
+   - `lakehouse.public.clients` and `lakehouse.public.products` must retain the latest record per primary key indefinitely so Flink join state can always rebuild on full replays; only fact/transient topics (`lakehouse.public.sales`, `sales_enriched`) may expire records by time/size.
+9. **PostgreSQL WAL & Debezium Heartbeats MUST stay active**:
+   - Keep `-c max_slot_wal_keep_size=1GB` on `postgres` and `heartbeat.action.query` writing to `public.debezium_heartbeat` (included in `dbz_lakehouse_publication`) so replication slot LSN advances even when business tables are idle.

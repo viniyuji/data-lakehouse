@@ -1,5 +1,7 @@
--- Pipeline & Checkpointing Configuration (stored in MinIO via s3-fs-presto)
+-- Pipeline & Checkpointing Configuration (RocksDB incremental checkpoints in MinIO via s3-fs-presto)
 SET 'pipeline.name' = 'sales-cdc-enrichment';
+SET 'state.backend.type' = 'rocksdb';
+SET 'state.backend.incremental' = 'true';
 SET 'execution.checkpointing.interval' = '10s';
 SET 'execution.checkpointing.mode' = 'EXACTLY_ONCE';
 SET 'state.checkpoints.num-retained' = '3';

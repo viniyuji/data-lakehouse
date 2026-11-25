@@ -38,15 +38,14 @@ AI agents MUST distinguish between **container-to-container addresses** (used in
 One-shot initialization containers eliminate manual post-boot commands:
 
 1. **Storage & Broker Layer**:
-   - `postgres` boots with `wal_level=logical` and runs `/docker-entrypoint-initdb.d/init.sql` on first volume initialization.
-   - `kafka` boots in single-node KRaft mode. Once healthy, `kafka-init` pre-creates `lakehouse.public.clients`, `lakehouse.public.products`, `lakehouse.public.sales`, and `sales_enriched`.
+   - `postgres` boots with `wal_level=logical` and `max_slot_wal_keep_size=1GB` (capping retained slot WAL disk growth if Debezium goes offline), running `/docker-entrypoint-initdb.d/init.sql` on first volume initialization.
+   - `kafka` boots in single-node KRaft mode (`KAFKA_LOG_CLEANER_ENABLE=true`, `KAFKA_LOG_RETENTION_CHECK_INTERVAL_MS=60000`). Once healthy, `kafka-init` creates all topics (`--if-not-exists`) and idempotently enforces per-topic retention/compaction policies via `kafka-configs.sh --alter`.
    - `minio` boots and passes `mc ready local`. Once healthy, `minio-init` creates `s3://flink-checkpoints`.
 2. **CDC Ingestion Layer**:
    - `debezium` waits for `postgres` and `kafka` healthchecks, creating internal Kafka Connect topics (`connect_configs`, `connect_offsets`, `connect_statuses`).
-   - `debezium-init` waits for `debezium` healthcheck and idempotently `PUT`s `/debezium/connector-config.json` to `/connectors/postgres-lakehouse-connector/config`.
+   - `debezium-init` waits for `debezium` healthcheck and idempotently `PUT`s `/debezium/connector-config.json` (including 10s LSN heartbeats and batch/queue sizing) to `/connectors/postgres-lakehouse-connector/config`.
 3. **Stream Processing Layer**:
-   - `flink-jobmanager` waits for `minio-init` completion so checkpoint storage exists before jobs start.
-   - `flink-taskmanager` registers slots with `flink-jobmanager`.
+   - `flink-jobmanager` and `flink-taskmanager` run with the **Embedded RocksDB** state backend (`state.backend.type: rocksdb`, `state.backend.incremental: true`), spilling join state to local disk and writing incremental checkpoints to `s3://flink-checkpoints/checkpoints`.
    - `flink-sql-submit` waits for `flink-jobmanager` (with $\ge 1$ available slot), `kafka-init`, and `debezium-init`, checks if `sales-cdc-enrichment` is already `RUNNING`, and if not, submits `/opt/flink/sql/job.sql`.
 
 ---

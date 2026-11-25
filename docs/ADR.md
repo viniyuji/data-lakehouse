@@ -90,3 +90,37 @@
 - **Decision**:
   - Implement `generate_data.py` using `faker` and `psycopg[binary]`, embedding PEP 723 `# /// script` metadata at the top alongside `requirements.txt`.
   - Generate a mix of `INSERT` (~70%) and status `UPDATE` (~30%, transitioning `PENDING` sales to `PAID`, `SHIPPED`, or `CANCELLED`) plus occasional new `clients` (~5%) so both insert and update CDC paths are exercised continuously.
+
+---
+
+## ADR-008: Kafka Retention vs. Log Compaction Split & Smaller Segments
+
+- **Status**: Accepted
+- **Context**: Kafka does not delete messages upon Flink consumption; default settings (`cleanup.policy=delete`, `retention.hours=168`, `segment.bytes=1GiB`) accumulate unbounded data for 7 days and never compact or delete an active 1 GiB segment in local PoC workloads. Conversely, applying time-based `delete` to dimension topics would evict unchanged `clients`/`products` and break Flink `INNER JOIN` replays.
+- **Decision**:
+  1. **Dimensions (`lakehouse.public.clients`, `lakehouse.public.products`)**: Pure `cleanup.policy=compact` (`segment.bytes=50MiB`, `min.cleanable.dirty.ratio=0.1`, `delete.retention.ms=1h`).
+  2. **Raw Facts (`lakehouse.public.sales`)**: Bounded `cleanup.policy=delete` (`retention.ms=86400000` [24h], `retention.bytes=536870912` [512 MiB], `segment.bytes=50MiB`).
+  3. **Upsert Sink (`sales_enriched`)**: Hybrid `cleanup.policy=compact,delete` (`retention.ms=86400000` [24h], `segment.bytes=50MiB`, `min.cleanable.dirty.ratio=0.1`, `delete.retention.ms=1h`) — deduplicates status transitions per `sale_id` while aging out sales older than 24h.
+  4. Enforce all topic configs idempotently via `kafka-configs.sh --alter` inside `kafka-init`, and set `KAFKA_LOG_RETENTION_CHECK_INTERVAL_MS=60000` on the broker.
+
+---
+
+## ADR-009: PostgreSQL WAL Disk Protection & Active Debezium Heartbeats
+
+- **Status**: Accepted
+- **Context**: PostgreSQL logical replication slots retain WAL files until `confirmed_flush_lsn` advances. Two operational hazards exist: (1) if Debezium stops while PostgreSQL takes writes, WAL grows without bound; (2) if tracked tables are idle while untracked tables receive writes, `confirmed_flush_lsn` stagnates unless Debezium writes a periodic heartbeat to a published table.
+- **Decision**:
+  1. Pass `-c max_slot_wal_keep_size=1GB` to `postgres`.
+  2. Create `public.debezium_heartbeat` in `postgres/init.sql` and pre-create `PUBLICATION dbz_lakehouse_publication FOR TABLE clients, products, sales, debezium_heartbeat`.
+  3. Configure `heartbeat.interval.ms = "10000"` and `heartbeat.action.query` upserting `public.debezium_heartbeat` in `debezium/connector-config.json` (while keeping `debezium_heartbeat` out of `table.include.list`), and compact `__debezium-heartbeat.lakehouse` with `10MiB` segments.
+  4. Set `ADVERTISED_HOST_NAME=debezium` and `CONNECT_SCHEDULED_REBALANCE_MAX_DELAY_MS=5000` on `debezium` so single-worker Kafka Connect rebalances complete in $\le 5\text{s}$ instead of stalling for 5 minutes (`300000ms` default) after broker/container restarts.
+
+---
+
+## ADR-010: Embedded RocksDB State Backend with Incremental Checkpoints (No State TTL)
+
+- **Status**: Accepted
+- **Context**: Regular streaming `INNER JOIN`s in Flink retain both sides in state so late updates to any `sale`, `client`, or `product` retract and re-emit enriched rows accurately. Keeping unbounded join state in `hashmap` risks `OutOfMemoryError` on JVM heap, whereas adding a global `table.exec.state.ttl` would drop historical sales (or worse, evict unchanged dimensions).
+- **Decision**:
+  - Set `state.backend.type: rocksdb` and `state.backend.incremental: true` across Flink services (`EmbeddedRocksDBStateBackendFactory` is bundled in `flink-dist-1.20.5.jar`), retaining `'state.checkpoints.num-retained' = '3'` in MinIO (`s3://flink-checkpoints/checkpoints`).
+  - Omit state TTL so 100% of historical `sales`, `clients`, and `products` remain updatable without heap pressure. *(If `sales` state expiration is ever desired later, use Flink 1.20 per-alias `/*+ STATE_TTL(...) */` hints on the `sales` input only—never global `table.exec.state.ttl`, which would also expire `clients` and `products`.)*
